@@ -61,7 +61,7 @@ impl TokenAsset {
         self.instance
             .methods()
             .set_decimals(symbol_hash, decimals)
-            .with_tx_policies(TxPolicies::default().with_tip(0))
+            .with_tx_policies(TxPolicies::default().with_tip(1))
             .call()
             .await
     }
