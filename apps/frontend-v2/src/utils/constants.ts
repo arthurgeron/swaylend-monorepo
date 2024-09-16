@@ -1,15 +1,14 @@
-export interface IToken {
-  logo: string;
-  assetId: string;
-  name: string;
-  symbol: string;
-  decimals: number;
-  pythSymbol: string;
-  priceFeed: string;
-}
+import fuel from '/public/icons/fuel-logo.svg?url';
+import btc from '/public/tokens/bitcoin.svg?url';
+import eth from '/public/tokens/ethereum.svg?url';
+import sway from '/public/tokens/sway.svg?url';
+import uni from '/public/tokens/uni.svg?url';
+import usdc from '/public/tokens/usdc.svg?url';
+import usdt from '/public/tokens/usdt.svg?url';
 
 // Indexer URL
 export const NODE_URL = 'https://testnet.fuel.network/v1/graphql';
+export const SWAYLEND_API = process.env.NEXT_PUBLIC_SWAYLEND_API!;
 
 // Contract addresses
 export type MarketConfiguration = {
@@ -54,8 +53,8 @@ export const FAUCET_URL = 'https://faucet-testnet.fuel.network/';
 export const FAUCET_AMOUNTS: Record<string, number> = {
   UNI: 50,
   BTC: 1,
-  USDC: 300,
-  USDT: 300,
+  USDC: 1000000,
+  USDT: 1000000,
   BNB: 300,
 };
 
@@ -70,4 +69,24 @@ export const ASSET_ID_TO_SYMBOL: Record<string, string> = {
   '0x6104c8e55327b418ac489353c977a7344d4ed3ff74af61a9efe9d3fe0f81c211': 'UNI',
   '0x2eef3d6048f6a6cf7a9d48b9724cf8035f6d25c0b25048173b47982464fe9a8d': 'BTC',
   '0x093b81d58871e5fb0dd382fb4696f7c074ccab19800298cd52e1111f5db859a7': 'BNB',
+};
+
+export const SYMBOL_TO_ICON: Record<string, any> = {
+  USDC: usdc,
+  USDT: usdt,
+  ETH: eth,
+  BTC: btc,
+  UNI: uni,
+  BNB: sway,
+  SWAY: sway,
+  FUEL: fuel,
+};
+
+export const SYMBOL_TO_NAME: Record<string, string> = {
+  BTC: 'Bitcoin',
+  ETH: 'Ethereum',
+  USDC: 'USD Coin',
+  USDT: 'Tether',
+  UNI: 'Uniswap',
+  BNB: 'Binance Coin',
 };
