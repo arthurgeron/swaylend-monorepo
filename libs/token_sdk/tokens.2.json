@@ -1,6 +1,6 @@
 [
   {
-    "asset_id": "0x4512f135579b7937cbf8646ec52b6348f4f767583f7797e9c9acbe86ceca7841",
+    "asset_id": "0x54ed68ad09d522fad75d150751b9c40401ce39bb8ca2d8ee7c7fde493fc2499a",
     "price_feed_id": "0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b",
     "price_feed_decimals": 7,
     "name": "USDT Coin",
@@ -21,10 +21,10 @@
     "borrow_collateral_factor": 800000000000000000,
     "liquidate_collateral_factor": 850000000000000000,
     "liquidation_penalty": 900000000000000000,
-    "supply_cap": 2000000000000000000000
+    "supply_cap": 1000000000000
   },
   {
-    "asset_id": "0xaf9fc9e6622ac78227ebd9f61fa3804123a2a85fdc6807946b9c65f4de4f9e06",
+    "asset_id": "0xc6f12a7f0a4810c7b45462af602c8f896351396d2a54eeab9562168bcc94c47f",
     "price_feed_id": "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
     "price_feed_decimals": 7,
     "name": "Bitcoin",
@@ -35,10 +35,10 @@
     "borrow_collateral_factor": 700000000000000000,
     "liquidate_collateral_factor": 770000000000000000,
     "liquidation_penalty": 950000000000000000,
-    "supply_cap": 1000000000000000000000
+    "supply_cap": 2000000000
   },
   {
-    "asset_id": "0xbed5c401f71b799a9d5327df0e83fc518a44058eeabfdb146b3543e8cfaaa8d8",
+    "asset_id": "0x2790257d173eafe4053f8c9760b27aed28c1f74498c7b3ec79c34fbc0f41167e",
     "price_feed_id": "0x2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
     "price_feed_decimals": 8,
     "name": "BNB",
@@ -49,6 +49,6 @@
     "borrow_collateral_factor": 750000000000000000,
     "liquidate_collateral_factor": 810000000000000000,
     "liquidation_penalty": 930000000000000000,
-    "supply_cap": 2000000000000000000000
+    "supply_cap": 400000000000000
   }
 ]
