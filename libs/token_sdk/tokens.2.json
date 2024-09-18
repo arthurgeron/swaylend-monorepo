@@ -1,6 +1,6 @@
 [
   {
-    "asset_id": "0x40470623c77feb72ddd2927795c096c2f44b86839cc38760adb0de1a1d6ba7d0",
+    "asset_id": "0x4512f135579b7937cbf8646ec52b6348f4f767583f7797e9c9acbe86ceca7841",
     "price_feed_id": "0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b",
     "price_feed_decimals": 7,
     "name": "USDT Coin",
@@ -24,7 +24,7 @@
     "supply_cap": 2000000000000000000000
   },
   {
-    "asset_id": "0x90e980fda95716ddc70992707c861397ac213ab7e01163e5686ce3e4a5e9667a",
+    "asset_id": "0xaf9fc9e6622ac78227ebd9f61fa3804123a2a85fdc6807946b9c65f4de4f9e06",
     "price_feed_id": "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
     "price_feed_decimals": 7,
     "name": "Bitcoin",
@@ -38,7 +38,7 @@
     "supply_cap": 1000000000000000000000
   },
   {
-    "asset_id": "0x6d3c9ad2352762281651cf9738f584f22f1ce6c6ba5e87fbce57f8b5d4c168bc",
+    "asset_id": "0xbed5c401f71b799a9d5327df0e83fc518a44058eeabfdb146b3543e8cfaaa8d8",
     "price_feed_id": "0x2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
     "price_feed_decimals": 8,
     "name": "BNB",
