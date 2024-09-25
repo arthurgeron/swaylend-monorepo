@@ -1,3 +1,4 @@
+import { GLOBAL_CONFIG } from '@sentio/runtime';
 import { BigDecimal } from '@sentio/sdk';
 import { FuelNetwork } from '@sentio/sdk/fuel';
 import { getPriceBySymbol } from '@sentio/sdk/utils';
@@ -131,14 +132,18 @@ const DEPLOYED_MARKETS: Record<
 > = {
   USDC: {
     marketAddress:
-      '0x66a64bffe98195ab13162b5f478bf5e1fa938631df2e845c29e3839727c41293',
-    startBlock: BigInt(10529000),
+      '0x689bfaf54edfc433f62d06f3581998f9cb32ce864da5ff99f4be7bed3556529d',
+    startBlock: BigInt(11200000),
   },
   USDT: {
     marketAddress:
       '0x5a22498724036fa16887731686c756aacf26e422ba64c826c5e521f47751f12b',
     startBlock: BigInt(10675000),
   },
+};
+
+GLOBAL_CONFIG.execution = {
+  sequential: true,
 };
 
 Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
@@ -320,42 +325,35 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
 
       // Collateral pool
       const collateralPoolId = `${chainId}_${ctx.contractAddress}_${asset_id}`;
-      const collateralPool = await ctx.store.get(
-        CollateralPool,
-        collateralPoolId
-      );
 
-      if (!collateralPool) {
-        const poolSnapshot = new CollateralPool({
-          id: collateralPoolId,
-          chainId: chainId,
-          poolAddress: ctx.contractAddress,
-          underlyingTokenAddress: asset_id,
-          underlyingTokenSymbol: ASSET_ID_TO_SYMBOL[asset_id],
-          underlyingTokenPriceUsd: BigDecimal(0),
-          availableAmount: BigDecimal(0),
-          availableAmountUsd: BigDecimal(0),
-          suppliedAmount: BigDecimal(0),
-          suppliedAmountUsd: BigDecimal(0),
-          nonRecursiveSuppliedAmount: BigDecimal(0),
-          collateralAmount: BigDecimal(0),
-          collateralAmountUsd: BigDecimal(0),
-          collateralFactor: BigDecimal(
-            borrow_collateral_factor.toString()
-          ).dividedBy(FACTOR_SCALE_18),
-          supplyIndex: BigDecimal(0),
-          supplyApr: BigDecimal(0),
-          borrowedAmount: BigDecimal(0),
-          borrowedAmountUsd: BigDecimal(0),
-          borrowIndex: BigDecimal(0),
-          borrowApr: BigDecimal(0),
-          totalFeesUsd: BigDecimal(0),
-          userFeesUsd: BigDecimal(0),
-          protocolFeesUsd: BigDecimal(0),
-        });
+      const poolSnapshot = new CollateralPool({
+        id: collateralPoolId,
+        chainId: chainId,
+        poolAddress: ctx.contractAddress,
+        underlyingTokenAddress: asset_id,
+        underlyingTokenSymbol: ASSET_ID_TO_SYMBOL[asset_id],
+        underlyingTokenPriceUsd: BigDecimal(0),
+        availableAmount: BigDecimal(0),
+        availableAmountUsd: BigDecimal(0),
+        suppliedAmount: BigDecimal(0),
+        suppliedAmountUsd: BigDecimal(0),
+        collateralAmount: BigDecimal(0),
+        collateralAmountUsd: BigDecimal(0),
+        collateralFactor: BigDecimal(
+          borrow_collateral_factor.toString()
+        ).dividedBy(FACTOR_SCALE_18),
+        supplyIndex: BigDecimal(0),
+        supplyApr: BigDecimal(0),
+        borrowedAmount: BigDecimal(0),
+        borrowedAmountUsd: BigDecimal(0),
+        borrowIndex: BigDecimal(0),
+        borrowApr: BigDecimal(0),
+        totalFeesUsd: BigDecimal(0),
+        userFeesUsd: BigDecimal(0),
+        protocolFeesUsd: BigDecimal(0),
+      });
 
-        await ctx.store.upsert(poolSnapshot);
-      }
+      await ctx.store.upsert(poolSnapshot);
     })
     .onLogCollateralAssetUpdated(async (event, ctx) => {
       const {
@@ -453,7 +451,9 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
           underlyingTokenSymbol:
             ASSET_ID_TO_SYMBOL[collateralConfiguration.assetAddress],
           suppliedAmount: BigDecimal(0),
+          suppliedAmountUsd: BigDecimal(0),
           borrowedAmount: BigDecimal(0),
+          borrowedAmountUsd: BigDecimal(0),
           collateralAmount: BigDecimal(amount.toString()).dividedBy(
             BigDecimal(10).pow(collateralConfiguration.decimals)
           ),
@@ -482,9 +482,7 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
         );
       }
 
-      collateralPool.collateralAmount = BigDecimal(
-        collateralPool.collateralAmount
-      ).plus(
+      collateralPool.collateralAmount = collateralPool.collateralAmount.plus(
         BigDecimal(amount.toString()).dividedBy(
           BigDecimal(10).pow(collateralConfiguration.decimals)
         )
@@ -531,12 +529,8 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
           .toString()
       );
 
-      // If user withdraws all collateral, delete the collateral position
-      if (collateralPosition.collateralAmount.lte(0)) {
-        await ctx.store.delete(collateralPosition, id);
-      } else {
-        await ctx.store.upsert(collateralPosition);
-      }
+      // If user withdraws all collatera
+      await ctx.store.upsert(collateralPosition);
 
       // Collateral pool
       const collateralPoolId = `${chainId}_${ctx.contractAddress}_${collateralConfiguration.assetAddress}`;
@@ -551,9 +545,7 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
         );
       }
 
-      collateralPool.collateralAmount = BigDecimal(
-        collateralPool.collateralAmount
-      ).minus(
+      collateralPool.collateralAmount = collateralPool.collateralAmount.minus(
         BigDecimal(amount.toString()).dividedBy(
           BigDecimal(10).pow(collateralConfiguration.decimals)
         )
@@ -588,7 +580,7 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
 
       await ctx.store.upsert(collateralPool);
 
-      // Get collateral position (and delete it as all collateral has been absorbed/seized)
+      // Get collateral position
       const collateralPositionId = `${chainId}_${ctx.contractAddress}_${address.bits}_${asset_id}`;
       const collateralPosition = await ctx.store.get(
         CollateralPosition,
@@ -601,10 +593,11 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
         );
       }
 
-      await ctx.store.delete(collateralPosition, collateralPositionId);
+      collateralPosition.collateralAmount = BigDecimal(0);
+
+      await ctx.store.upsert(collateralPosition);
     })
     .onLogMarketBasicEvent(async (event, ctx) => {
-      2;
       const {
         data: {
           market_basic: {
@@ -773,6 +766,14 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
             basePositionSnapshotId
           );
 
+          const suppliedAmount = userBasic.isNegative
+            ? BigDecimal(0)
+            : presentValue;
+
+          const borrowedAmount = userBasic.isNegative
+            ? presentValue
+            : BigDecimal(0);
+
           // Create base position snapshot if it doesn't exist
           if (!basePositionSnapshot) {
             const underlyingTokenAddress = marketConfiguration.baseTokenAddress;
@@ -786,23 +787,22 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
               underlyingTokenAddress: underlyingTokenAddress,
               underlyingTokenSymbol: ASSET_ID_TO_SYMBOL[underlyingTokenAddress],
               userAddress: userBasic.address,
-              suppliedAmount: userBasic.isNegative
-                ? BigDecimal(0)
-                : presentValue,
-              borrowedAmount: userBasic.isNegative
-                ? presentValue
-                : BigDecimal(0),
+              suppliedAmount: suppliedAmount,
+              suppliedAmountUsd: suppliedAmount.times(basePrice),
+              borrowedAmount: borrowedAmount,
+              borrowedAmountUsd: borrowedAmount.times(basePrice),
               collateralAmount: BigDecimal(0),
+              collateralAmountUsd: BigDecimal(0),
             });
           } else {
             basePositionSnapshot.timestamp = START_TIME_UNIX;
             basePositionSnapshot.blockDate = START_TIME_FORMATED;
-            basePositionSnapshot.suppliedAmount = userBasic.isNegative
-              ? BigDecimal(0)
-              : presentValue;
-            basePositionSnapshot.borrowedAmount = userBasic.isNegative
-              ? presentValue
-              : BigDecimal(0);
+            basePositionSnapshot.suppliedAmount = suppliedAmount;
+            basePositionSnapshot.suppliedAmountUsd =
+              suppliedAmount.times(basePrice);
+            basePositionSnapshot.borrowedAmount = borrowedAmount;
+            basePositionSnapshot.borrowedAmountUsd =
+              borrowedAmount.times(basePrice);
           }
 
           await ctx.store.upsert(basePositionSnapshot);
@@ -855,14 +855,13 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
               .times(basePrice),
             suppliedAmount: totalSupplyBase,
             suppliedAmountUsd: totalSupplyBase.times(basePrice),
-            nonRecursiveSuppliedAmount: totalSupplyBase,
             collateralAmount: BigDecimal(0),
             collateralAmountUsd: BigDecimal(0),
             collateralFactor: BigDecimal(0),
             supplyIndex: marketBasic.baseSupplyIndex.dividedBy(FACTOR_SCALE_15),
             supplyApr: supplyApr,
             borrowedAmount: totalBorrowBase,
-            borrowedAmountUsd: BigDecimal(0),
+            borrowedAmountUsd: totalBorrowBase.times(basePrice),
             borrowIndex: marketBasic.baseBorrowIndex.dividedBy(FACTOR_SCALE_15),
             borrowApr: borrowApr,
             totalFeesUsd: BigDecimal(0),
@@ -876,7 +875,6 @@ Object.values(DEPLOYED_MARKETS).forEach(({ marketAddress, startBlock }) => {
             totalSupplyBase.minus(totalBorrowBase);
           basePoolSnapshot.borrowedAmount = totalBorrowBase;
           basePoolSnapshot.suppliedAmount = totalSupplyBase;
-          basePoolSnapshot.nonRecursiveSuppliedAmount = totalSupplyBase;
           basePoolSnapshot.supplyIndex =
             marketBasic.baseSupplyIndex.dividedBy(FACTOR_SCALE_15);
           basePoolSnapshot.borrowIndex =

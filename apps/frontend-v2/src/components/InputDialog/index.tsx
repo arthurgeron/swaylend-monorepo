@@ -5,23 +5,26 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
+  useBalance,
   useBorrowBase,
   useBorrowCapacity,
   useCollateralConfigurations,
   useMarketBalanceOfBase,
   useMarketConfiguration,
+  useMaxWithdrawableCollateral,
   usePrice,
   useSupplyBase,
   useSupplyCollateral,
+  useTotalCollateral,
   useUserCollateralAssets,
   useUserSupplyBorrow,
   useWithdrawBase,
   useWithdrawCollateral,
 } from '@/hooks';
 import { cn } from '@/lib/utils';
-import { ACTION_TYPE, MARKET_MODE, useMarketStore } from '@/stores';
-import { ASSET_ID_TO_SYMBOL, formatUnits } from '@/utils';
-import { useAccount, useBalance, useIsConnected } from '@fuels/react';
+import { ACTION_TYPE, useMarketStore } from '@/stores';
+import { ASSET_ID_TO_SYMBOL, formatUnits, getFormattedNumber } from '@/utils';
+import { useAccount, useIsConnected } from '@fuels/react';
 import * as VisuallyHidden from '@radix-ui/react-visually-hidden';
 import BigNumber from 'bignumber.js';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -35,6 +38,7 @@ export const InputDialog = () => {
   const { data: marketConfiguration } = useMarketConfiguration();
   const { data: userCollateralAssets } = useUserCollateralAssets();
   const { data: collateralConfigurations } = useCollateralConfigurations();
+  const { data: collateralBalances } = useTotalCollateral();
   const { data: borrowCapacity } = useBorrowCapacity();
   const { data: userSupplyBorrow } = useUserSupplyBorrow();
   const {
@@ -65,6 +69,9 @@ export const InputDialog = () => {
   const { mutate: borrowBase } = useBorrowBase();
 
   const [error, setError] = useState<string | null>(null);
+
+  const { data: maxWithdrawableCollateral } =
+    useMaxWithdrawableCollateral(actionTokenAssetId);
 
   const handleSubmit = () => {
     if (!marketConfiguration) return;
@@ -108,52 +115,55 @@ export const InputDialog = () => {
       default:
         break;
     }
-    // setOpen(false);
   };
 
   const handleModeChange = (action: ACTION_TYPE) => {
     changeAction(action);
   };
 
-  const { balance } = useBalance({
-    address: account ?? '',
-    assetId: actionTokenAssetId ?? '',
+  const { data: balance } = useBalance({
+    address: account ?? undefined,
+    assetId: actionTokenAssetId ?? undefined,
   });
 
   const finalBalance = useMemo(() => {
+    if (
+      !collateralConfigurations ||
+      !balance ||
+      !marketConfiguration ||
+      !actionTokenAssetId ||
+      !userSupplyBorrow
+    ) {
+      return BigNumber(0);
+    }
+
     if (action === 'REPAY') {
       return formatUnits(
-        BigNumber(balance?.toString() ?? 0),
-        marketConfiguration?.baseTokenDecimals
+        BigNumber(balance.toString()),
+        marketConfiguration.baseTokenDecimals
       );
     }
     if (action === 'SUPPLY') {
       if (actionTokenAssetId === marketConfiguration?.baseToken) {
         return formatUnits(
-          BigNumber(balance?.toString() ?? 0),
-          marketConfiguration?.baseTokenDecimals
+          BigNumber(balance.toString()),
+          marketConfiguration.baseTokenDecimals
         );
       }
       return formatUnits(
-        BigNumber(balance?.toString() ?? 0),
-        collateralConfigurations?.[actionTokenAssetId ?? '']?.decimals ?? 9
+        BigNumber(balance.toString()),
+        collateralConfigurations[actionTokenAssetId].decimals
       );
     }
     if (action === 'WITHDRAW') {
       if (actionTokenAssetId === marketConfiguration?.baseToken) {
         return formatUnits(
-          BigNumber(userSupplyBorrow?.supplied ?? new BigNumber(0) ?? 0),
-          marketConfiguration?.baseTokenDecimals
+          userSupplyBorrow.supplied,
+          marketConfiguration.baseTokenDecimals
         );
       }
-      return formatUnits(
-        BigNumber(
-          userCollateralAssets?.[actionTokenAssetId ?? ''] ??
-            new BigNumber(0) ??
-            0
-        ),
-        collateralConfigurations?.[actionTokenAssetId ?? '']?.decimals ?? 9
-      );
+
+      return maxWithdrawableCollateral ?? BigNumber(0);
     }
 
     if (action === 'BORROW') {
@@ -167,26 +177,48 @@ export const InputDialog = () => {
     action,
     marketConfiguration,
     collateralConfigurations,
+    maxWithdrawableCollateral,
   ]);
 
   const onMaxBtnClick = () => {
-    if (userSupplyBorrow == null || finalBalance == null) return null;
+    if (
+      userSupplyBorrow == null ||
+      finalBalance == null ||
+      marketBalanceOfBase == null ||
+      !actionTokenAssetId ||
+      !collateralConfigurations ||
+      !marketConfiguration
+    ) {
+      return null;
+    }
+
+    const decimals =
+      actionTokenAssetId === marketConfiguration.baseToken
+        ? marketConfiguration.baseTokenDecimals
+        : collateralConfigurations[actionTokenAssetId].decimals;
 
     switch (action) {
       case ACTION_TYPE.SUPPLY: {
-        changeTokenAmount(BigNumber(finalBalance.toFixed(9)));
+        changeTokenAmount(BigNumber(finalBalance.toFixed(decimals)));
         break;
       }
       case ACTION_TYPE.WITHDRAW:
-        changeTokenAmount(BigNumber(finalBalance.toFixed(9)));
+        if (actionTokenAssetId === marketConfiguration.baseToken) {
+          changeTokenAmount(BigNumber(finalBalance.toFixed(decimals)));
+        } else {
+          // TODO: Check max withdrawable collateral amount...
+
+          // Get borrowed amount
+          changeTokenAmount(BigNumber(finalBalance.toFixed(decimals)));
+        }
         break;
       case ACTION_TYPE.BORROW:
-        if (marketBalanceOfBase?.formatted.lt(finalBalance)) {
+        if (marketBalanceOfBase.formatted.lt(finalBalance)) {
           changeTokenAmount(
-            BigNumber(marketBalanceOfBase?.formatted.toFixed(9))
+            BigNumber(marketBalanceOfBase.formatted.toFixed(decimals))
           );
         } else {
-          changeTokenAmount(BigNumber(finalBalance.toFixed(9)));
+          changeTokenAmount(BigNumber(finalBalance.toFixed(decimals)));
         }
         break;
       case ACTION_TYPE.REPAY: {
@@ -200,21 +232,21 @@ export const InputDialog = () => {
           ) ?? BigNumber(0);
 
         if (finalBalanceRepay.gte(userBorrowed)) {
-          changeTokenAmount(BigNumber(userBorrowed.toFixed(9)));
+          changeTokenAmount(BigNumber(userBorrowed.toFixed(decimals)));
         } else {
-          changeTokenAmount(BigNumber(finalBalanceRepay.toFixed(9)));
+          changeTokenAmount(BigNumber(finalBalanceRepay.toFixed(decimals)));
         }
         break;
       }
     }
   };
 
-  const { balance: actionTokenBalance } = useBalance({
+  const { data: actionTokenBalance } = useBalance({
     address: account ?? undefined,
     assetId: actionTokenAssetId ?? undefined,
   });
 
-  const { balance: baseTokenBalance } = useBalance({
+  const { data: baseTokenBalance } = useBalance({
     address: account ?? undefined,
     assetId: marketConfiguration?.baseToken,
   });
@@ -246,6 +278,21 @@ export const InputDialog = () => {
           BigNumber(actionTokenBalance.toString()),
           collateralConfigurations?.[actionTokenAssetId ?? '']?.decimals
         );
+        const collateralBalance =
+          collateralBalances?.get(actionTokenAssetId) ?? BigNumber(0);
+        const supplyCapLeft = formatUnits(
+          BigNumber(
+            collateralConfigurations?.[
+              actionTokenAssetId ?? ''
+            ]?.supply_cap.toString() ?? '0'
+          ).minus(collateralBalance),
+          collateralConfigurations?.[actionTokenAssetId ?? '']?.decimals
+        );
+
+        if (supplyCapLeft.eq(0)) return 'Supply cap reached';
+        if (supplyCapLeft.minus(tokenAmount).lt(0)) {
+          return 'Amount is higher than the supply cap available';
+        }
       }
       if (balance == null) return null;
       if (balance.lt(tokenAmount)) return 'Insufficient balance';
@@ -480,7 +527,7 @@ export const InputDialog = () => {
               </div>
               <div className="flex mt-2 justify-between items-center w-full">
                 <div className="text-moon text-sm">
-                  {finalBalance.toFormat(4)}
+                  {getFormattedNumber(finalBalance)}
                   {action === ACTION_TYPE.BORROW
                     ? ' available to borrow'
                     : ' available'}
@@ -506,7 +553,8 @@ export const InputDialog = () => {
                 onMouseDown={handleSubmit}
                 className="w-1/2"
               >
-                Submit
+                {action &&
+                  `${action.slice(0, 1)}${action.slice(1).toLowerCase()}`}
               </Button>
             </div>
             <div className="w-full flex justify-center">

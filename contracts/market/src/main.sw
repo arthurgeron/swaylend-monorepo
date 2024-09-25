@@ -19,7 +19,6 @@ use std::asset::{mint_to, transfer};
 use std::auth::{AuthError, msg_sender};
 use std::call_frames::msg_asset_id;
 use std::contract_id::ContractId;
-use std::constants::ZERO_B256;
 use std::context::{msg_amount, this_balance};
 use std::hash::{Hash, sha256};
 use std::logging::log;
@@ -28,11 +27,15 @@ use std::storage::storage_vec::*;
 use std::u128::U128;
 use std::vec::Vec;
 use std::bytes::Bytes;
+use std::convert::TryFrom;
+use sway_libs::reentrancy::reentrancy_guard;
+use standards::src5::{SRC5, State};
+use sway_libs::ownership::*;
+
 
 // This is set during deployment of the contract
 configurable {
     DEBUG_STEP: u64 = 0,
-    FUEL_ETH_BASE_ASSET_ID: b256 = 0xf8f8b6283d7fa5b672b530cbb84fcccb4ff8dc40f8176ef4544ddb1f1952ad07,
     ORACLE_MAX_STALENESS: u64 = 30, // 30 seconds
     ORACLE_MAX_AHEADNESS: u64 = 60, // 60 seconds
     ORACLE_MAX_CONF_WIDTH: u256 = 100, // 100 / 10000 = 1 % 
@@ -42,30 +45,30 @@ storage {
     // market configuration
     market_configuration: MarketConfiguration = MarketConfiguration::default(),
     // configuration for collateral assets (can add, pause ...)
-    collateral_configurations: StorageMap<b256, CollateralConfiguration> = StorageMap {},
+    collateral_configurations: StorageMap<AssetId, CollateralConfiguration> = StorageMap {},
     // list of asset ids of collateral assets
-    collateral_configurations_keys: StorageVec<b256> = StorageVec {},
+    collateral_configurations_keys: StorageVec<AssetId> = StorageVec {},
     // booleans to pause certain functionalities
     pause_config: PauseConfiguration = PauseConfiguration::default(),
     // total collateral for each asset
-    totals_collateral: StorageMap<b256, u256> = StorageMap {},
+    totals_collateral: StorageMap<AssetId, u64> = StorageMap {},
     // how much collateral user provided (separate for each asset)
-    user_collateral: StorageMap<(Address, b256), u256> = StorageMap {},
+    user_collateral: StorageMap<(Identity, AssetId), u64> = StorageMap {},
     // holds information about the users details in the market
-    user_basic: StorageMap<Address, UserBasic> = StorageMap {},
+    user_basic: StorageMap<Identity, UserBasic> = StorageMap {},
     // information about the whole market (total supply, total borrow, etc.)
     market_basic: MarketBasics = MarketBasics::default(),
     // debug timestamp (for testing purposes)
     debug_timestamp: u64 = 0,
     // pyth contract id
-    pyth_contract_id: b256 = ZERO_B256,
+    pyth_contract_id: ContractId = ContractId::zero(),
 }
 
 // Market contract implementation
 impl Market for Contract {
     // # 0. Activate contract
-    #[storage(read, write)]
-    fn activate_contract(market_configuration: MarketConfiguration) {
+    #[storage(write)]
+    fn activate_contract(market_configuration: MarketConfiguration, owner: Identity) {
         require(
             storage
                 .market_basic
@@ -73,6 +76,9 @@ impl Market for Contract {
                 .read() == 0,
             Error::AlreadyActive,
         );
+
+        // Set owner
+        initialize_ownership(owner);
 
         // Set market configuration
         storage.market_configuration.write(market_configuration);
@@ -84,8 +90,6 @@ impl Market for Contract {
             .write(timestamp().into());
 
         let market_basic = storage.market_basic.read();
-
-
 
         let pause_config = PauseConfiguration {
             supply_paused: false,
@@ -112,7 +116,7 @@ impl Market for Contract {
     // # 1. Debug functionality (for testing purposes)
 
     // ## 1.1 Manually increment timestamp
-    #[storage(read, write)]
+    #[storage(write)]
     fn debug_increment_timestamp() {
         require(DEBUG_STEP > 0, Error::DebuggingDisabled);
 
@@ -126,16 +130,11 @@ impl Market for Contract {
     // ## 2.1 Add new collateral asset
     // ### Parameters:
     // - `configuration`: The collateral configuration to be added
-    #[storage(write, read)]
+    #[storage(write)]
     fn add_collateral_asset(configuration: CollateralConfiguration) {
-        // Only governor can add new collateral asset
-        require(
-            msg_sender_address() == storage
-                .market_configuration
-                .read()
-                .governor,
-            Error::Unauthorized,
-        );
+        // Only owner can add new collateral asset
+        only_owner();
+
         // Check if asset already exists
         require(
             storage
@@ -162,16 +161,10 @@ impl Market for Contract {
     // ## 2.2 Pause an existing collateral asset
     // ### Parameters:
     // - `asset_id`: The asset ID of the collateral asset to be paused
-    #[storage(read, write)]
-    fn pause_collateral_asset(asset_id: b256) {
-        // Only governor can pause collateral asset
-        require(
-            msg_sender_address() == storage
-                .market_configuration
-                .read()
-                .governor,
-            Error::Unauthorized,
-        );
+    #[storage(write)]
+    fn pause_collateral_asset(asset_id: AssetId) {
+        // Only owner can pause collateral asset
+        only_owner();
 
         let mut configuration = storage.collateral_configurations.get(asset_id).read();
         configuration.paused = true;
@@ -187,16 +180,10 @@ impl Market for Contract {
     // ## 2.3 Resume a paused collateral asset
     // ### Parameters:
     // - `asset_id`: The asset ID of the collateral asset to be resumed
-    #[storage(read, write)]
-    fn resume_collateral_asset(asset_id: b256) {
-        // only governor can resume collateral asset
-        require(
-            msg_sender_address() == storage
-                .market_configuration
-                .read()
-                .governor,
-            Error::Unauthorized,
-        );
+    #[storage(write)]
+    fn resume_collateral_asset(asset_id: AssetId) {
+        // Only owner can resume collateral asset
+        only_owner();
 
         let mut configuration = storage.collateral_configurations.get(asset_id).read();
         configuration.paused = false;
@@ -213,16 +200,11 @@ impl Market for Contract {
     // ### Parameters:
     // - `asset_id`: The asset ID of the collateral asset to be updated
     // - `configuration`: The new collateral configuration
-    #[storage(read, write)]
-    fn update_collateral_asset(asset_id: b256, configuration: CollateralConfiguration) {
-        // Only governor can update collateral asset
-        require(
-            msg_sender_address() == storage
-                .market_configuration
-                .read()
-                .governor,
-            Error::Unauthorized,
-        );
+    #[storage(write)]
+    fn update_collateral_asset(asset_id: AssetId, configuration: CollateralConfiguration) {
+        // Only owner can update collateral asset
+        only_owner();
+
         // Check if asset exists
         require(
             storage
@@ -263,17 +245,17 @@ impl Market for Contract {
     // # 3. Collateral asset management (Supply and Withdrawal)
 
     // ## 3.1 Supply Collateral
-    #[payable, storage(read, write)]
+    #[payable, storage(write)]
     fn supply_collateral() {
         // Only allow supplying collateral if paused flag is not set
         require(!storage.pause_config.supply_paused.read(), Error::Paused);
 
         // Check that the amount is greater than 0
-        let amount: u256 = msg_amount().into();
+        let amount = msg_amount();
         require(amount > 0, Error::InvalidPayment);
 
         // Get the asset ID of the collateral asset being supplied and check that it is not paused
-        let asset_id: b256 = msg_asset_id().into();
+        let asset_id: AssetId = msg_asset_id();
         let collateral_configuration = storage.collateral_configurations.get(asset_id).read();
         require(!collateral_configuration.paused, Error::Paused);
 
@@ -285,8 +267,8 @@ impl Market for Contract {
             Error::SupplyCapExceeded,
         );
 
-        // Get the caller's address and calculate the new user collateral
-        let caller = msg_sender_address();
+        // Get the caller's account and calculate the new user collateral
+        let caller = msg_sender().unwrap();
         let user_collateral = storage.user_collateral.get((caller, asset_id)).try_read().unwrap_or(0) + amount;
 
         // Update the storage values (total collateral, user collateral)
@@ -297,9 +279,9 @@ impl Market for Contract {
 
         // Log user supply collateral event
         log(UserSupplyCollateralEvent {
-            address: caller,
+            account: caller,
             asset_id,
-            amount: amount,
+            amount,
         });
     }
 
@@ -308,14 +290,16 @@ impl Market for Contract {
     // - `asset_id`: The asset ID of the collateral asset to be withdrawn
     // - `amount`: The amount of collateral to be withdrawn
     // - `price_data_update`: The price data update struct to be used for updating the price feeds
-    #[payable, storage(read, write)]
+    #[payable, storage(write)]
     fn withdraw_collateral(
-        asset_id: b256,
-        amount: u256,
+        asset_id: AssetId,
+        amount: u64,
         price_data_update: PriceDataUpdate,
     ) {
-        // Get the caller's address and calculate the new user and total collateral
-        let caller = msg_sender_address();
+        reentrancy_guard();
+
+        // Get the caller's account and calculate the new user and total collateral
+        let caller = msg_sender().unwrap();
         let user_collateral = storage.user_collateral.get((caller, asset_id)).try_read().unwrap_or(0) - amount;
         let total_collateral = storage.totals_collateral.get(asset_id).try_read().unwrap_or(0) - amount;
 
@@ -333,39 +317,38 @@ impl Market for Contract {
         require(is_borrow_collateralized(caller), Error::NotCollateralized);
 
         transfer(
-            Identity::Address(caller),
-            AssetId::from(asset_id),
-            <u64 as TryFrom<u256>>::try_from(amount)
-                .unwrap(),
+            caller,
+            asset_id,
+            amount,
         );
 
         // Log user withdraw collateral event
         log(UserWithdrawCollateralEvent {
-            address: caller,
+            account: caller,
             asset_id,
-            amount: amount,
+            amount,
         });
     }
 
     // ## 3.3 Get User Collateral
     // ### Parameters:
-    // - `address`: The address of the user
+    // - `account`: The account of the user
     // - `asset_id`: The asset ID of the collateral asset
     #[storage(read)]
-    fn get_user_collateral(address: Address, asset_id: b256) -> u256 {
-        storage.user_collateral.get((address, asset_id)).try_read().unwrap_or(0)
+    fn get_user_collateral(account: Identity, asset_id: AssetId) -> u64 {
+        storage.user_collateral.get((account, asset_id)).try_read().unwrap_or(0)
     }
 
     // ## 3.4 Get all of User's Collateral assets
     // ### Parameters:
-    // - `address`: The address of the user
+    // - `account`: The account of the user
     #[storage(read)]
-    fn get_all_user_collateral(address: Address) -> Vec<(b256, u256)> {
+    fn get_all_user_collateral(account: Identity) -> Vec<(AssetId, u64)> {
         let mut result = Vec::new();
         let mut index = 0;
         while index < storage.collateral_configurations_keys.len() {
             let collateral_configuration = storage.collateral_configurations.get(storage.collateral_configurations_keys.get(index).unwrap().read()).read();
-            let collateral_amount = storage.user_collateral.get((address, collateral_configuration.asset_id)).try_read().unwrap_or(0);
+            let collateral_amount = storage.user_collateral.get((account, collateral_configuration.asset_id)).try_read().unwrap_or(0);
             result.push((collateral_configuration.asset_id, collateral_amount));
             index += 1;
         }
@@ -376,14 +359,29 @@ impl Market for Contract {
     // ### Parameters:
     // - `asset_id`: The asset ID of the collateral asset
     #[storage(read)]
-    fn totals_collateral(asset_id: b256) -> u256 {
+    fn totals_collateral(asset_id: AssetId) -> u64 {
         storage.totals_collateral.get(asset_id).try_read().unwrap_or(0)
+    }
+
+    // ## 3.6 Get Total Collateral for all collateral assets
+    // ### Returns:
+    // - `Vec<(AssetId, u64)>`: A list of tuples containing the asset ID and total collateral for each collateral asset
+    #[storage(read)]
+    fn get_all_totals_collateral() -> Vec<(AssetId, u64)> {
+        let mut result = Vec::new();
+        let mut index = 0;
+        while index < storage.collateral_configurations_keys.len() {
+            let asset_id = storage.collateral_configurations_keys.get(index).unwrap().read();
+            result.push((asset_id, storage.totals_collateral.get(asset_id).try_read().unwrap_or(0)));
+            index += 1;
+        }
+        result
     }
 
     // # 4. Base asset management (Supply and Withdrawal)
 
     // ## 4.1 Supply Base
-    #[payable, storage(read, write)]
+    #[payable, storage(write)]
     fn supply_base() {
         // Only allow supplying if paused flag is not set
         require(!storage.pause_config.supply_paused.read(), Error::Paused);
@@ -393,7 +391,7 @@ impl Market for Contract {
         let base_asset_id = storage.market_configuration.read().base_token;
         require(
             amount > 0 && msg_asset_id()
-                .bits() == base_asset_id,
+                 == base_asset_id,
             Error::InvalidPayment,
         );
 
@@ -401,7 +399,7 @@ impl Market for Contract {
         accrue_internal();
 
         // Get caller's user basic state
-        let caller = msg_sender_address();
+        let caller = msg_sender().unwrap();
         let user_basic = storage.user_basic.get(caller).try_read().unwrap_or(UserBasic::default());
         let user_principal = user_basic.principal;
 
@@ -425,7 +423,7 @@ impl Market for Contract {
 
         // Emit user supply base event
         log(UserSupplyBaseEvent {
-            address: caller,
+            account: caller,
             supply_amount,
             repay_amount,
         });
@@ -438,8 +436,10 @@ impl Market for Contract {
     // ### Parameters:
     // - `amount`: The amount of base asset to be withdrawn
     // - `price_data_update`: The price data update struct to be used for updating the price feeds
-    #[payable, storage(read, write)]
-    fn withdraw_base(amount: u256, price_data_update: PriceDataUpdate) {
+    #[payable, storage(write)]
+    fn withdraw_base(amount: u64, price_data_update: PriceDataUpdate) {
+        reentrancy_guard();
+
         // Only allow withdrawing if paused flag is not set
         require(!storage.pause_config.withdraw_paused.read(), Error::Paused);
 
@@ -450,7 +450,7 @@ impl Market for Contract {
         accrue_internal();
 
         // Get caller's user basic state
-        let caller = msg_sender_address();
+        let caller = msg_sender().unwrap();
         let user_basic = storage.user_basic.get(caller).try_read().unwrap_or(UserBasic::default());
         let user_principal = user_basic.principal;
 
@@ -462,7 +462,7 @@ impl Market for Contract {
         let (withdraw_amount, borrow_amount) = withdraw_and_borrow_amount(user_principal, user_principal_new);
 
         log(UserWithdrawBaseEvent {
-            address: caller,
+            account: caller,
             withdraw_amount,
             borrow_amount,
         });
@@ -502,31 +502,30 @@ impl Market for Contract {
 
         // Transfer base asset to the caller
         transfer(
-            Identity::Address(caller),
-            AssetId::from(storage.market_configuration.read().base_token),
-            <u64 as TryFrom<u256>>::try_from(amount)
-                .unwrap(),
+            caller,
+            storage.market_configuration.read().base_token,
+            amount,
         );
     }
 
     // ## 4.3 Get user supply and borrow
     // ### Parameters:
-    // - `account`: The address of the user
+    // - `account`: The account of the user
     // ### Returns:
     // - `supply`: The amount of base asset supplied by the user
     // - `borrow`: The amount of base asset borrowed by the user
     #[storage(read)]
-    fn get_user_supply_borrow(account: Address) -> (u256, u256) {
+    fn get_user_supply_borrow(account: Identity) -> (u256, u256) {
         get_user_supply_borrow_internal(account)
     }
 
     // ## 4.4 Get how much user can borrow
     // ### Parameters:
-    // - `account`: The address of the user
+    // - `account`: The account of the user
     // ### Returns:
     // - `borrow`: The amount of base asset the user can borrow
     #[storage(read)]
-    fn available_to_borrow(account: Address) -> u256 {
+    fn available_to_borrow(account: Identity) -> u256 {
         // Get user's supply and borrow
         let (_, borrow) = get_user_supply_borrow_internal(account);
 
@@ -537,7 +536,7 @@ impl Market for Contract {
         while index < storage.collateral_configurations_keys.len() {
             let collateral_configuration = storage.collateral_configurations.get(storage.collateral_configurations_keys.get(index).unwrap().read()).read();
 
-            let balance = storage.user_collateral.get((account, collateral_configuration.asset_id)).try_read().unwrap_or(0);
+            let balance: u256 = storage.user_collateral.get((account, collateral_configuration.asset_id)).try_read().unwrap_or(0).into();
 
             let price = get_price_internal(collateral_configuration.price_feed_id); // decimals: price.exponent
             let price_exponent = price.exponent;
@@ -570,8 +569,10 @@ impl Market for Contract {
     // - Absorb a list of underwater accounts onto the protocol balance sheet
     // ### Parameters:
     // - `accounts`: The list of underwater accounts to be absorbed
-    #[payable, storage(read, write)]
-    fn absorb(accounts: Vec<Address>, price_data_update: PriceDataUpdate) {
+    #[payable, storage(write)]
+    fn absorb(accounts: Vec<Identity>, price_data_update: PriceDataUpdate) {
+        reentrancy_guard();
+
         // Check that the pause flag is not set
         require(!storage.pause_config.absorb_paused.read(), Error::Paused);
 
@@ -593,11 +594,11 @@ impl Market for Contract {
     // ### Description:
     // - Check if an account is liquidatable
     // ### Parameters:
-    // - `account`: The address of the account to be checked
+    // - `account`: The account to be checked
     // ### Returns:
     // - `bool`: True if the account is liquidatable, False otherwise
     #[storage(read)]
-    fn is_liquidatable(account: Address) -> bool {
+    fn is_liquidatable(account: Identity) -> bool {
         is_liquidatable_internal(account)
     }
 
@@ -610,17 +611,19 @@ impl Market for Contract {
     // ### Parameters:
     // - `asset_id`: The asset ID of the collateral asset to be bought
     // - `min_amount`: The minimum amount of collateral to be bought
-    // - `recipient`: The address of the recipient of the collateral
+    // - `recipient`: The account of the recipient of the collateral
     #[payable, storage(read)]
-    fn buy_collateral(asset_id: b256, min_amount: u256, recipient: Address) {
+    fn buy_collateral(asset_id: AssetId, min_amount: u64, recipient: Identity) {
+        reentrancy_guard();
+
         // Only allow buying collateral if paused flag is not set
         require(!storage.pause_config.buy_paused.read(), Error::Paused);
-        let payment_amount: u256 = msg_amount().into();
+        let payment_amount = msg_amount();
 
         // Only allow payment in the base token and check that the payment amount is greater than 0
         require(
             msg_asset_id()
-                .bits() == storage
+                 == storage
                 .market_configuration
                 .read()
                 .base_token && payment_amount > 0,
@@ -639,8 +642,6 @@ impl Market for Contract {
             Error::NotForSale,
         );
 
-        // TODO[Martin]: Checkout what these 2 notes do/mean and if we need a re-entrancy guard
-        // Note: Re-entrancy can skip the reserves check above on a second buyCollateral call.
         let reserves = get_collateral_reserves_internal(asset_id);
 
         // Calculate the quote for a collateral asset in exchange for an amount of the base asset
@@ -655,10 +656,7 @@ impl Market for Contract {
             Error::InsufficientReserves,
         );
 
-        // Note: Pre-transfer hook can re-enter buyCollateral with a stale collateral ERC20 balance.
-        // Assets should not be listed which allow re-entry from pre-transfer now, as too much collateral could be bought.
-        // This is also a problem if quoteCollateral derives its discount from the collateral ERC20 balance.
-        let caller = msg_sender_address();
+        let caller = msg_sender().unwrap();
 
         // Emit buy collateral event
         log(BuyCollateralEvent {
@@ -671,10 +669,9 @@ impl Market for Contract {
 
         // Transfer the collateral asset to the recipient
         transfer(
-            Identity::Address(recipient),
-            AssetId::from(asset_id),
-            <u64 as TryFrom<u256>>::try_from(collateral_amount)
-                .unwrap(),
+            recipient,
+            asset_id,
+            collateral_amount,
         );
     }
 
@@ -685,7 +682,7 @@ impl Market for Contract {
     // ### Returns:
     // - `value`: The value of the collateral asset in base asset
     #[storage(read)]
-    fn collateral_value_to_sell(asset_id: b256, collateral_amount: u256) -> u256 { // decimals: base_token_decimals
+    fn collateral_value_to_sell(asset_id: AssetId, collateral_amount: u64) -> u64 { // decimals: base_token_decimals
         let collateral_configuration = storage.collateral_configurations.get(asset_id).read();
 
         // Get the collateral asset price
@@ -707,7 +704,10 @@ impl Market for Contract {
                 .base_token_decimals,
         );
 
-        asset_price_discounted * collateral_amount * base_price_scale / asset_price_scale / base_price / scale
+        let collateral_value = asset_price_discounted * collateral_amount.into() * base_price_scale / asset_price_scale / base_price / scale;
+
+        // Native assets are in u64
+        <u64 as TryFrom<u256>>::try_from(collateral_value).unwrap()
     }
 
     // ## 6.3 Get collateral quote for an amount of base asset
@@ -717,7 +717,7 @@ impl Market for Contract {
     // ### Returns:
     // - `quote`: The quote for the collateral asset in exchange for the base asset (asset decimals)
     #[storage(read)]
-    fn quote_collateral(asset_id: b256, base_amount: u256) -> u256 {
+    fn quote_collateral(asset_id: AssetId, base_amount: u64) -> u64 {
         quote_collateral_internal(asset_id, base_amount)
     }
 
@@ -733,41 +733,36 @@ impl Market for Contract {
 
     // ## 7.2 Withdraw reserves
     // ### Parameters:
-    // - `to`: The address to which the reserves will be sent
+    // - `to`: The account to which the reserves will be sent
     // - `amount`: The amount of reserves to be withdrawn
     #[storage(read)]
-    fn withdraw_reserves(to: Address, amount: u256) {
-        let caller = msg_sender_address();
+    fn withdraw_reserves(to: Identity, amount: u64) {
+        // Only owner can withdraw reserves
+        only_owner();
+        
+        let caller = msg_sender().unwrap();
 
-        // Only governor can withdraw reserves
-        require(
-            caller == storage
-                .market_configuration
-                .read()
-                .governor,
-            Error::Unauthorized,
-        );
         let reserves = get_reserves_internal();
 
         // Check that the reserves are greater than 0 and that the amount is less than or equal to the reserves
         require(
             reserves >= I256::zero() && reserves
-                .value >= amount,
+                .value >= amount.into(),
             Error::InsufficientReserves,
         );
 
         // Emit reserves withdrawn event
         log(ReservesWithdrawnEvent {
-            address: caller,
-            amount: amount,
+            caller,
+            to,
+            amount,
         });
 
         // Transfer the reserves to the recipient
         transfer(
-            Identity::Address(to),
-            AssetId::from(storage.market_configuration.read().base_token),
-            <u64 as TryFrom<u256>>::try_from(amount)
-                .unwrap(),
+            to,
+            storage.market_configuration.read().base_token,
+            amount,
         )
     }
 
@@ -777,7 +772,7 @@ impl Market for Contract {
     // ### Returns:
     // - `reserves`: The reserves (asset decimals)
     #[storage(read)]
-    fn get_collateral_reserves(asset_id: b256) -> I256 {
+    fn get_collateral_reserves(asset_id: AssetId) -> I256 {
         get_collateral_reserves_internal(asset_id)
     }
 
@@ -788,19 +783,10 @@ impl Market for Contract {
     // - Update the pause configuration of the contract
     // ### Parameters:
     // - `pause_config`: The pause configuration to be set
-    #[storage(write, read)]
+    #[storage(write)]
     fn pause(pause_config: PauseConfiguration) {
-        let caller = msg_sender_address();
-        require(
-            caller == storage
-                .market_configuration
-                .read()
-                .governor || caller == storage
-                .market_configuration
-                .read()
-                .pause_guardian,
-            Error::Unauthorized,
-        );
+        // Only owner can change the pause configuration
+        only_owner();
 
         // Emit pause configuration updated event
         log(PauseConfigurationEvent { pause_config });
@@ -850,21 +836,21 @@ impl Market for Contract {
 
     // ## 9.5 Get user basic
     // ### Parameters:
-    // - `account`: The address of the user
+    // - `account`: The account of the user
     // ### Returns:
     // - `UserBasic`: The user basic information
     #[storage(read)]
-    fn get_user_basic(account: Address) -> UserBasic {
+    fn get_user_basic(account: Identity) -> UserBasic {
         storage.user_basic.get(account).try_read().unwrap_or(UserBasic::default())
     }
 
     // ## 9.6 Get user balance (with included interest)
     // ### Parameters:
-    // - `account`: The address of the user
+    // - `account`: The account of the user
     // ### Returns:
     // - `I256`: The user balance (with included interest)
     #[storage(read)]
-    fn get_user_balance_with_interest(account: Address) -> I256 {
+    fn get_user_balance_with_interest(account: Identity) -> I256 {
         let mut user_basic = storage.user_basic.get(account).try_read().unwrap_or(UserBasic::default());
         let last_accrual_time = storage.market_basic.last_accrual_time.read();
 
@@ -874,15 +860,14 @@ impl Market for Contract {
 
         // Set latest values (the principal is now the present value of the user's supply or borrow)
         if !user_basic.principal.negative {
-            present_value = present_value_supply(supply_index, user_basic.principal.into()).into();
+            present_value = present_value_supply(supply_index, user_basic.principal.try_into().unwrap() ).into();
         } else {
-            present_value = present_value_borrow(borrow_index, user_basic.principal.flip().into()).into();
+            present_value = present_value_borrow(borrow_index, user_basic.principal.flip().try_into().unwrap()).into();
             present_value = present_value.flip();
         }
 
         present_value
     }
-
 
     // ## 9.7 Get utilization
     // ### Returns:
@@ -893,8 +878,8 @@ impl Market for Contract {
     }
 
     // ## 9.8 Get balance of an asset
-    fn balance_of(asset: b256) -> u64 {
-        this_balance(AssetId::from(asset))
+    fn balance_of(asset_id: AssetId) -> u64 {
+        this_balance(asset_id)
     }
 
     // ## 9.9 Get supply rate for a given utilization
@@ -918,17 +903,11 @@ impl Market for Contract {
     }
 
     // # 10. Pyth Oracle management
-    #[storage(read, write)]
+    #[storage(write)]
     fn set_pyth_contract_id(contract_id: ContractId) {
-        // Only governor can set the Pyth contract ID
-        require(
-            msg_sender_address() == storage
-                .market_configuration
-                .read()
-                .governor,
-            Error::Unauthorized,
-        );
-        storage.pyth_contract_id.write(contract_id.into());
+        // Only owner can set the Pyth contract ID
+        only_owner();
+        storage.pyth_contract_id.write(contract_id);
     }
 
     #[storage(read)]
@@ -943,20 +922,15 @@ impl Market for Contract {
 
     #[payable, storage(read)]
     fn update_price_feeds_if_necessary(price_data_update: PriceDataUpdate) {
+        reentrancy_guard();
         update_price_feeds_if_necessary_internal(price_data_update)
     }
 
     // # 11. Changing market configuration
-    #[storage(read, write)]
+    #[storage(write)]
     fn update_market_configuration(configuration: MarketConfiguration) {
-        // Only governor can update the market configuration
-        require(
-            msg_sender_address() == storage
-                .market_configuration
-                .read()
-                .governor,
-            Error::Unauthorized,
-        );
+        // Only owner can update the market configuration
+        only_owner();
 
         let mut configuration = configuration;
 
@@ -972,19 +946,35 @@ impl Market for Contract {
             market_config: configuration,
         });
     }
+
+    // # 12. Ownership management
+    #[storage(write)]
+    fn transfer_ownership(new_owner: Identity) {
+        transfer_ownership(new_owner);
+    }
+
+    #[storage(write)]
+    fn renounce_ownership() {
+        renounce_ownership();
+    }
 }
 
-// # 10. Pyth Oracle management
+impl SRC5 for Contract {
+    #[storage(read)]
+    fn owner() -> State {
+        _owner()
+    }
+}
+
 #[storage(read)]
 fn get_price_internal(price_feed_id: PriceFeedId) -> Price {
     let contract_id = storage.pyth_contract_id.read();
-    require(contract_id != ZERO_B256, Error::OracleContractIdNotSet);
+    require(contract_id != ContractId::zero(), Error::OracleContractIdNotSet);
 
-    let oracle = abi(PythCore, contract_id);
+    let oracle = abi(PythCore, contract_id.bits());
     let price = oracle.price(price_feed_id);
 
     // validate values
-
     if price.publish_time < std::block::timestamp() {
         let staleness = std::block::timestamp() - price.publish_time;
         require(staleness <= ORACLE_MAX_STALENESS, Error::OraclePriceValidationError);
@@ -1003,9 +993,9 @@ fn get_price_internal(price_feed_id: PriceFeedId) -> Price {
 #[storage(read)]
 fn update_fee_internal(update_data: Vec<Bytes>) -> u64 {
     let contract_id = storage.pyth_contract_id.read();
-    require(contract_id != ZERO_B256, Error::OracleContractIdNotSet);
+    require(contract_id != ContractId::zero(), Error::OracleContractIdNotSet);
 
-    let oracle = abi(PythCore, contract_id);
+    let oracle = abi(PythCore, contract_id.bits());
     let fee = oracle.update_fee(update_data);
     fee
 }
@@ -1013,19 +1003,19 @@ fn update_fee_internal(update_data: Vec<Bytes>) -> u64 {
 #[payable, storage(read)]
 fn update_price_feeds_if_necessary_internal(price_data_update: PriceDataUpdate) {
     let contract_id = storage.pyth_contract_id.read();
-    require(contract_id != ZERO_B256, Error::OracleContractIdNotSet);
+    require(contract_id != ContractId::zero(), Error::OracleContractIdNotSet);
 
     // check if the payment is sufficient
     require(
         msg_amount() >= price_data_update.update_fee && msg_asset_id()
-            .bits() == FUEL_ETH_BASE_ASSET_ID,
+             == AssetId::base(),
         Error::InvalidPayment,
     );
 
-    let oracle = abi(PythCore, contract_id);
+    let oracle = abi(PythCore, contract_id.bits());
     oracle
         .update_price_feeds_if_necessary {
-            asset_id: FUEL_ETH_BASE_ASSET_ID,
+            asset_id: AssetId::base().bits(),
             coins: price_data_update.update_fee,
         }(
             price_data_update
@@ -1046,16 +1036,6 @@ fn timestamp() -> u64 {
         storage.debug_timestamp.read()
     } else {
         std::block::timestamp()
-    }
-}
-
-// ## Get the message sender's address
-// ### Description:
-// - Returns the message sender's address, reverting if the message sender is a contract
-fn msg_sender_address() -> Address {
-    match msg_sender().unwrap() {
-        Identity::Address(identity) => identity,
-        _ => revert(0),
     }
 }
 
@@ -1110,10 +1090,10 @@ pub fn principal_value_borrow(base_borrow_index: u256, present: u256) -> u256 {
 fn present_value(principal: I256) -> I256 {
     let market_basic = storage.market_basic.read();
     if principal >= I256::zero() {
-        let present_value = present_value_supply(market_basic.base_supply_index, principal.into());
+        let present_value = present_value_supply(market_basic.base_supply_index, principal.try_into().unwrap());
         I256::from(present_value)
     } else {
-        let present_value = present_value_borrow(market_basic.base_borrow_index, principal.flip().into());
+        let present_value = present_value_borrow(market_basic.base_borrow_index, principal.flip().try_into().unwrap());
         I256::from(present_value).flip()
     }
 }
@@ -1127,10 +1107,10 @@ fn present_value(principal: I256) -> I256 {
 fn principal_value(present_value: I256) -> I256 {
     let market_basic = storage.market_basic.read();
     if present_value >= I256::zero() {
-        let principal_value = principal_value_supply(market_basic.base_supply_index, present_value.into());
+        let principal_value = principal_value_supply(market_basic.base_supply_index, present_value.try_into().unwrap());
         I256::from(principal_value)
     } else {
-        let principal_value = principal_value_borrow(market_basic.base_borrow_index, present_value.flip().into());
+        let principal_value = principal_value_borrow(market_basic.base_borrow_index, present_value.flip().try_into().unwrap());
         I256::from(principal_value).flip()
     }
 }
@@ -1195,20 +1175,20 @@ fn get_borrow_rate_internal(utilization: u256) -> u256 {
 
 // ## Calculate user's supply and borrow amounts
 // ### Parameters:
-// - `account`: The address of the user
+// - `account`: The account of the user
 // ### Returns:
 // - `supply`: The amount of base asset supplied by the user
 // - `borrow`: The amount of base asset borrowed by the user
 #[storage(read)]
-fn get_user_supply_borrow_internal(account: Address) -> (u256, u256) {
+fn get_user_supply_borrow_internal(account: Identity) -> (u256, u256) {
     let principal = storage.user_basic.get(account).try_read().unwrap_or(UserBasic::default()).principal;
     let last_accrual_time = storage.market_basic.last_accrual_time.read();
     let (supply_index, borrow_index) = accrued_interest_indices(timestamp().into(), last_accrual_time);
     if !principal.negative {
-        let supply = present_value_supply(supply_index, principal.into());
+        let supply = present_value_supply(supply_index, principal.try_into().unwrap());
         (supply, 0)
     } else {
-        let borrow = present_value_borrow(borrow_index, principal.flip().into());
+        let borrow = present_value_borrow(borrow_index, principal.flip().try_into().unwrap());
         (0, borrow)
     }
 }
@@ -1251,7 +1231,7 @@ fn accrued_interest_indices(now: u256, last_accrual_time: u256) -> (u256, u256) 
 
 // Checks that the dollar value of the user's collateral multiplied by borrow_collateral_factor is greater than the (planned) loan amount.
 #[storage(read)]
-fn is_borrow_collateralized(account: Address) -> bool {
+fn is_borrow_collateralized(account: Identity) -> bool {
     let principal = storage.user_basic.get(account).try_read().unwrap_or(UserBasic::default()).principal; // decimals: base_asset_decimal
     if !principal.negative {
         return true
@@ -1264,7 +1244,7 @@ fn is_borrow_collateralized(account: Address) -> bool {
     while index < storage.collateral_configurations_keys.len() {
         let collateral_configuration = storage.collateral_configurations.get(storage.collateral_configurations_keys.get(index).unwrap().read()).read();
 
-        let balance = storage.user_collateral.get((account, collateral_configuration.asset_id)).try_read().unwrap_or(0); // decimals: collateral_configuration.decimals
+        let balance: u256 = storage.user_collateral.get((account, collateral_configuration.asset_id)).try_read().unwrap_or(0).into(); // decimals: collateral_configuration.decimals
         let price = get_price_internal(collateral_configuration.price_feed_id); // decimals: price.exponent decimals
         let price_scale = u256::from(10_u64).pow(price.exponent);
         let price = u256::from(price.price); // decimals: price.exponent
@@ -1286,24 +1266,24 @@ fn is_borrow_collateralized(account: Address) -> bool {
 
 // ## Check whether an account has enough collateral to not be liquidated
 // ### Parameters:
-// - `account`: The address of the account to be checked
+// - `account`: The account of the account to be checked
 // ### Returns:
 // - `bool`: True if the account is liquidatable, False otherwise
 #[storage(read)]
-fn is_liquidatable_internal(account: Address) -> bool {
+fn is_liquidatable_internal(account: Identity) -> bool {
     let principal = storage.user_basic.get(account).try_read().unwrap_or(UserBasic::default()).principal; // decimals: base_asset_decimal
     if !principal.negative {
         return false
     };
 
-    let present: u256 = present_value(principal.flip()).into(); // decimals: base_token_decimals
+    let present: u256 = present_value(principal.flip()).try_into().unwrap(); // decimals: base_token_decimals
     let mut liquidation_treshold: u256 = 0;
 
     let mut index = 0;
     while index < storage.collateral_configurations_keys.len() {
         let collateral_configuration = storage.collateral_configurations.get(storage.collateral_configurations_keys.get(index).unwrap().read()).read();
 
-        let balance = storage.user_collateral.get((account, collateral_configuration.asset_id)).try_read().unwrap_or(0); // decimals: collateral_configuration.decimals
+        let balance: u256 = storage.user_collateral.get((account, collateral_configuration.asset_id)).try_read().unwrap_or(0).into(); // decimals: collateral_configuration.decimals
         let price = get_price_internal(collateral_configuration.price_feed_id); // decimals: price.exponent
         let price_scale = u256::from(10.pow(price.exponent));
         let price = u256::from(price.price); // decimals: price.exponent
@@ -1328,8 +1308,8 @@ fn is_liquidatable_internal(account: Address) -> bool {
 // ### Returns:
 // - `reserves`: The reserves (asset decimals)
 #[storage(read)]
-fn get_collateral_reserves_internal(asset_id: b256) -> I256 {
-    I256::from(this_balance(AssetId::from(asset_id))) - I256::from(storage.totals_collateral.get(asset_id).try_read().unwrap_or(0))
+fn get_collateral_reserves_internal(asset_id: AssetId) -> I256 {
+    I256::from(this_balance(asset_id)) - I256::from(storage.totals_collateral.get(asset_id).try_read().unwrap_or(0))
 }
 
 // ## Get the total amount of protocol reserves of the base asset
@@ -1340,14 +1320,14 @@ fn get_reserves_internal() -> I256 {
     let market_basic = storage.market_basic.read();
 
     let (base_supply_index, base_borrow_index) = accrued_interest_indices(timestamp().into(), market_basic.last_accrual_time); // decimals: (18, 18)
-    let balance = this_balance(AssetId::from(storage.market_configuration.read().base_token)); // decimals: base_token_decimals
+    let balance = this_balance(storage.market_configuration.read().base_token); // decimals: base_token_decimals
     let total_supply = present_value_supply(base_supply_index, market_basic.total_supply_base); // decimals: base_token_decimals
     let total_borrow = present_value_borrow(base_borrow_index, market_basic.total_borrow_base); // decimals: base_token_decimals
     I256::from(balance) - I256::from(total_supply) + I256::from(total_borrow)
 }
 
 // ## Accrue interest
-#[storage(read, write)]
+#[storage(write)]
 fn accrue_internal() {
     let mut market_basic = storage.market_basic.read();
 
@@ -1389,11 +1369,11 @@ fn accrue_internal() {
 // ### Description:
 // - The function through which any balance changes will pass. updates the reward variables on the user
 // ### Parameters:
-// - `account`: The address of the user
+// - `account`: The account of the user
 // - `basic`: The user basic information
 // - `principal_new`: The new principal value
-#[storage(write, read)]
-fn update_base_principal(account: Address, basic: UserBasic, principal_new: I256) {
+#[storage(write)]
+fn update_base_principal(account: Identity, basic: UserBasic, principal_new: I256) {
     let market_basic = storage.market_basic.read();
 
     let principal = basic.principal;
@@ -1404,11 +1384,11 @@ fn update_base_principal(account: Address, basic: UserBasic, principal_new: I256
     // Calculate accrued base interest
     if principal >= I256::zero() {
         let index_delta: u256 = market_basic.tracking_supply_index - basic.base_tracking_index;
-        let base_tracking_accrued_delta = index_delta * principal.into() / storage.market_configuration.read().base_tracking_index_scale / accrual_descale_factor;
+        let base_tracking_accrued_delta = index_delta * principal.try_into().unwrap()  / storage.market_configuration.read().base_tracking_index_scale / accrual_descale_factor;
         basic.base_tracking_accrued += base_tracking_accrued_delta;
     } else {
         let index_delta: u256 = market_basic.tracking_borrow_index - basic.base_tracking_index;
-        let base_tracking_accrued_delta = index_delta * principal.flip().into() / storage.market_configuration.read().base_tracking_index_scale / accrual_descale_factor;
+        let base_tracking_accrued_delta = index_delta * principal.flip().try_into().unwrap() / storage.market_configuration.read().base_tracking_index_scale / accrual_descale_factor;
         basic.base_tracking_accrued += base_tracking_accrued_delta;
     }
 
@@ -1424,7 +1404,7 @@ fn update_base_principal(account: Address, basic: UserBasic, principal_new: I256
 
     // Emit user basic event
     log(UserBasicEvent {
-        address: account,
+        account,
         user_basic: basic
     });
 }
@@ -1445,11 +1425,11 @@ fn repay_and_supply_amount(old_principal: I256, new_principal: I256) -> (u256, u
     };
 
     if new_principal <= I256::zero() {
-        return ((new_principal - old_principal).into(), u256::zero());
+        return ((new_principal - old_principal).try_into().unwrap(), u256::zero());
     } else if old_principal >= I256::zero() {
-        return (u256::zero(), (new_principal - old_principal).into());
+        return (u256::zero(), (new_principal - old_principal).try_into().unwrap());
     } else {
-        return (old_principal.flip().into(), new_principal.into());
+        return (old_principal.flip().try_into().unwrap(), new_principal.try_into().unwrap() );
     }
 }
 
@@ -1469,11 +1449,11 @@ fn withdraw_and_borrow_amount(old_principal: I256, new_principal: I256) -> (u256
     };
 
     if new_principal >= I256::zero() {
-        return ((old_principal - new_principal).into(), u256::zero());
+        return ((old_principal - new_principal).try_into().unwrap(), u256::zero());
     } else if old_principal <= I256::zero() {
-        return (u256::zero(), (old_principal - new_principal).into());
+        return (u256::zero(), (old_principal - new_principal).try_into().unwrap());
     } else {
-        return ((old_principal).into(), (new_principal).flip().into());
+        return ((old_principal).try_into().unwrap(), (new_principal).flip().try_into().unwrap());
     }
 }
 
@@ -1484,7 +1464,7 @@ fn withdraw_and_borrow_amount(old_principal: I256, new_principal: I256) -> (u256
 // ### Returns:
 // - `quote`: The quote for the collateral asset in exchange for the base asset
 #[storage(read)]
-fn quote_collateral_internal(asset_id: b256, base_amount: u256) -> u256 {
+fn quote_collateral_internal(asset_id: AssetId, base_amount: u64) -> u64 {
     let collateral_configuration = storage.collateral_configurations.get(asset_id).read();
 
     // Get the asset price
@@ -1501,21 +1481,24 @@ fn quote_collateral_internal(asset_id: b256, base_amount: u256) -> u256 {
     let collateral_scale = u256::from(10_u64).pow(collateral_configuration.decimals);
     let base_scale = u256::from(10_u64).pow(storage.market_configuration.read().base_token_decimals);
 
-    let value = base_price * base_amount / base_scale; // decimals: base_price.exponent
-    value * asset_price_scale * collateral_scale / asset_price_discounted / base_price_scale // decimals: collateral_configuration.decimals
+    let value = base_price * base_amount.into() / base_scale; // decimals: base_price.exponent
+    let quote = value * asset_price_scale * collateral_scale / asset_price_discounted / base_price_scale; // decimals: collateral_configuration.decimals
+
+    // Native assets are in u64
+    <u64 as TryFrom<u256>>::try_from(quote).unwrap()
 }
 
 // ## Absorb an account
 // ### Description:
 // - The function transfers the pledge (collateral) to the property of the protocol and closes the user's debt
 // ### Parameters:
-// - `account`: The address of the account to be absorbed
-#[storage(read, write)]
-fn absorb_internal(account: Address) {
+// - `account`: The account of the account to be absorbed
+#[storage(write)]
+fn absorb_internal(account: Identity) {
     // Check that the account is liquidatable
     require(is_liquidatable_internal(account), Error::NotLiquidatable);
 
-    let caller = msg_sender_address();
+    let caller = msg_sender().unwrap();
 
     // Get the user's basic information
     let account_user = storage.user_basic.get(account).try_read().unwrap_or(UserBasic::default());
@@ -1531,7 +1514,7 @@ fn absorb_internal(account: Address) {
         let seize_amount = storage.user_collateral.get((account, collateral_configuration.asset_id)).try_read().unwrap_or(0); // decimals: collateral_asset_decimals
 
         // If the user has no collateral of the asset, skip to the next asset
-        if seize_amount == u256::zero() {
+        if seize_amount == 0 {
             index += 1;
             continue;
         }
@@ -1559,16 +1542,16 @@ fn absorb_internal(account: Address) {
         let collateral_scale = u256::from(10_u64).pow(collateral_configuration.decimals);
 
         // Apply liquidation penalty to the seized amount
-        delta_value += seize_amount * price * collateral_configuration.liquidation_penalty / collateral_scale / price_scale; // decimals: 18
+        delta_value += price * seize_amount.into() * collateral_configuration.liquidation_penalty / collateral_scale / price_scale; // decimals: 18
         index += 1;
 
         // Total value of seized collateral with liquidation penalty
-        total_value += seize_amount * price * FACTOR_SCALE_18 / collateral_scale / price_scale; // decimals: 18
-        let seize_value = seize_amount * price / collateral_scale; // decimals: price.exponent
+        total_value += price * seize_amount.into() * FACTOR_SCALE_18 / collateral_scale / price_scale; // decimals: 18
+        let seize_value = price * seize_amount.into() / collateral_scale; // decimals: price.exponent
 
         // Emit absorb collateral event
         log(AbsorbCollateralEvent {
-            address: account,
+            account,
             asset_id: collateral_configuration.asset_id,
             amount: seize_amount, // decimals: collateral_asset_decimals
             seize_value, // decimals: price.exponent
@@ -1613,7 +1596,7 @@ fn absorb_internal(account: Address) {
 
     // Emit user liquidated event
     log(UserLiquidatedEvent {
-        address: account,
+        account,
         liquidator: caller,
         base_paid_out: delta_balance,
         base_paid_out_value: delta_balance_value,
